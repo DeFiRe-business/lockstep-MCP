@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "defire-lockstep": {
+      "command": "node",
+      "args": ["../../server/dist/index.js"],
+      "env": {
+        "RPC_URL": "",
+        "LOCKSTEP_REGISTRY_ADDRESS": "",
+        "LOCKSTEP_HOOK_ADDRESS": "",
+        "LOCKSTEP_INTERNAL_HOOK_ADDRESS": "",
+        "LOCKSTEP_ROUTER_ADDRESS": "",
+        "WALLET_ADDRESS": ""
+      }
+    }
+  }
+}
