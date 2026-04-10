@@ -6,6 +6,7 @@ import { registerAgentTools } from "./tools/agent.js";
 import { registerRoutingTools } from "./tools/routing.js";
 import { registerLeaderboardTools } from "./tools/leaderboard.js";
 import { registerStatusTools } from "./tools/status.js";
+import { registerAdminTools } from "./tools/admin.js";
 
 const server = new McpServer({ name: "defire-lockstep", version: "0.1.0" });
 
@@ -15,6 +16,7 @@ registerAgentTools(server);
 registerRoutingTools(server);
 registerLeaderboardTools(server);
 registerStatusTools(server);
+registerAdminTools(server);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

@@ -1,116 +1,168 @@
 import { z } from "zod";
-import { getAgentStatus } from "../data-store.js";
-import { getAgentFromChain } from "../blockchain/contracts.js";
-const MIN_COLLATERAL_RATIO_BPS = {
-    Newcomer: 1500,
-    Rising: 1200,
-    Established: 1000,
-    Elite: 800,
-};
+import { getRegistry, getRegistryAs, getVaultAs, statusName, tierName, } from "../blockchain/contracts.js";
 export function registerAgentTools(server) {
-    server.tool("register_trading_agent", "Register as a trading agent on the Lockstep protocol", {
+    server.tool("register_trading_agent", "Register the caller as a trading agent on the LockstepRegistry. Requires TRADING_AGENT_PRIVATE_KEY (or MCP_PRIVATE_KEY).", {
         name: z.string().min(1).max(64),
-        strategy_description: z.string().min(10).max(500),
-        capital_required: z.number().positive(),
-        collateral_amount: z.number().positive(),
-        commitment_period_days: z.number().int().min(7).max(365),
+        strategy: z.string().min(10).max(500),
+        collateral: z.string().describe("Collateral in wei (string-encoded uint256)"),
+        capital_managed: z.string().describe("Capital managed in wei"),
+        commitment_deadline: z.number().int().describe("Unix timestamp"),
         min_return_bps: z.number().int().min(0).max(10000),
-        profit_split_investor_bps: z.number().int().min(1000).max(9500),
-    }, async ({ name, strategy_description, capital_required, collateral_amount, commitment_period_days, min_return_bps, profit_split_investor_bps }) => {
-        const collateralRatioBps = Math.round((collateral_amount / capital_required) * 10000);
-        const tier = "Newcomer";
-        const minRequired = MIN_COLLATERAL_RATIO_BPS[tier];
-        if (collateralRatioBps < minRequired) {
+        profit_split_investor_bps: z.number().int().min(0).max(10000),
+        profit_split_agent_bps: z.number().int().min(0).max(10000),
+        profit_split_protocol_bps: z.number().int().min(0).max(10000),
+    }, async (params) => {
+        try {
+            const registry = getRegistryAs("trading_agent");
+            const tx = await registry.registerTradingAgent(params.name, params.strategy, BigInt(params.collateral), BigInt(params.capital_managed), BigInt(params.commitment_deadline), BigInt(params.min_return_bps), BigInt(params.profit_split_investor_bps), BigInt(params.profit_split_agent_bps), BigInt(params.profit_split_protocol_bps));
+            const receipt = await tx.wait();
+            // Parse AgentRegistered event to get the assigned agentId
+            const parsed = receipt?.logs
+                .map((log) => {
+                try {
+                    return registry.interface.parseLog(log);
+                }
+                catch {
+                    return null;
+                }
+            })
+                .find((p) => p?.name === "AgentRegistered");
+            const agentId = parsed?.args?.agentId?.toString() ?? "unknown";
             return {
                 content: [{
                         type: "text",
                         text: JSON.stringify({
-                            error: `Collateral ratio ${collateralRatioBps}bps is below minimum ${minRequired}bps for ${tier} tier. Increase collateral to at least ${(capital_required * minRequired) / 10000}.`,
+                            success: true,
+                            agent_id: agentId,
+                            tx_hash: tx.hash,
+                            block_number: receipt?.blockNumber,
+                            gas_used: receipt?.gasUsed?.toString(),
+                        }, null, 2),
+                    }],
+            };
+        }
+        catch (err) {
+            return {
+                content: [{
+                        type: "text",
+                        text: JSON.stringify({
+                            success: false,
+                            error: err instanceof Error ? err.message : String(err),
                         }),
                     }],
                 isError: true,
             };
         }
-        const agentId = `prop-${Date.now().toString(36)}`;
-        return {
-            content: [{
-                    type: "text",
-                    text: JSON.stringify({
-                        status: "registered",
-                        agent_id: agentId,
-                        name,
-                        strategy_description,
-                        capital_required,
-                        collateral_amount,
-                        collateral_ratio_bps: collateralRatioBps,
-                        commitment_period_days,
-                        min_return_bps,
-                        profit_split_investor_bps,
-                        tier,
-                        message: `Agent "${name}" registered successfully. Deposit ${collateral_amount} as collateral to activate your proposal. Investors can now fund your proposal at ${agentId}.`,
-                    }),
-                }],
-        };
     });
-    server.tool("get_my_agent_status", "Get current status of a registered trading agent", {
-        agent_id: z.string(),
+    server.tool("get_my_agent_status", "Read on-chain status of an agent the trading-agent role owns. Identifies the agent by its numeric agent_id.", {
+        agent_id: z.number().int().positive(),
     }, async ({ agent_id }) => {
-        const onChain = await getAgentFromChain(agent_id);
-        if (onChain) {
+        try {
+            const registry = getRegistry();
+            const raw = await registry.getAgent(BigInt(agent_id));
             return {
                 content: [{
                         type: "text",
                         text: JSON.stringify({
-                            agentId: agent_id,
-                            name: onChain.name,
-                            capital: onChain.capital.toString(),
-                            collateral: onChain.collateral.toString(),
-                            pnl: onChain.pnl.toString(),
-                            status: onChain.status,
-                            source: "on-chain",
-                        }),
+                            agent_id,
+                            owner: raw.owner,
+                            name: raw.name,
+                            strategy: raw.strategy,
+                            collateral: raw.collateral.toString(),
+                            capital_managed: raw.capitalManaged.toString(),
+                            commitment_deadline: raw.commitmentDeadline.toString(),
+                            min_return_bps: raw.minReturnBps.toString(),
+                            profit_split_investor_bps: raw.profitSplitInvestorBps.toString(),
+                            profit_split_agent_bps: raw.profitSplitAgentBps.toString(),
+                            profit_split_protocol_bps: raw.profitSplitProtocolBps.toString(),
+                            tier: tierName(raw.tier),
+                            status: statusName(raw.status),
+                        }, null, 2),
                     }],
             };
         }
-        const status = getAgentStatus(agent_id);
-        if (!status) {
+        catch (err) {
             return {
-                content: [{ type: "text", text: JSON.stringify({ error: `Agent ${agent_id} not found` }) }],
+                content: [{
+                        type: "text",
+                        text: JSON.stringify({ error: err instanceof Error ? err.message : String(err) }),
+                    }],
                 isError: true,
             };
         }
-        return {
-            content: [{ type: "text", text: JSON.stringify({ ...status, source: "mock" }) }],
-        };
     });
-    server.tool("report_pnl", "Submit a periodic P&L snapshot for the trading agent", {
-        agent_id: z.string(),
-        current_balance: z.number().nonnegative(),
-        open_positions: z.number().int().nonnegative(),
-    }, async ({ agent_id, current_balance, open_positions }) => {
-        const status = getAgentStatus(agent_id);
-        if (!status) {
+    server.tool("deposit_collateral", "Deposit native ETH into the CollateralVault under the trading-agent's address. Requires TRADING_AGENT_PRIVATE_KEY (or MCP_PRIVATE_KEY).", {
+        amount: z.string().describe("Amount in wei (string-encoded uint256)"),
+    }, async ({ amount }) => {
+        try {
+            const vault = getVaultAs("trading_agent");
+            const tx = await vault.deposit({ value: BigInt(amount) });
+            const receipt = await tx.wait();
             return {
-                content: [{ type: "text", text: JSON.stringify({ error: `Agent ${agent_id} not found` }) }],
+                content: [{
+                        type: "text",
+                        text: JSON.stringify({
+                            success: true,
+                            amount,
+                            tx_hash: tx.hash,
+                            block_number: receipt?.blockNumber,
+                            gas_used: receipt?.gasUsed?.toString(),
+                        }, null, 2),
+                    }],
+            };
+        }
+        catch (err) {
+            return {
+                content: [{
+                        type: "text",
+                        text: JSON.stringify({
+                            success: false,
+                            error: err instanceof Error ? err.message : String(err),
+                        }),
+                    }],
                 isError: true,
             };
         }
-        const pnl = current_balance - status.capitalDeployed;
-        const pnlPct = (pnl / status.capitalDeployed) * 100;
-        return {
-            content: [{
-                    type: "text",
-                    text: JSON.stringify({
-                        status: "pnl_reported",
-                        agent_id,
-                        current_balance,
-                        open_positions,
-                        pnl,
-                        pnl_pct: Math.round(pnlPct * 100) / 100,
-                        timestamp: new Date().toISOString(),
-                        message: `P&L snapshot recorded: balance=${current_balance}, pnl=${pnl} (${pnlPct.toFixed(2)}%), open_positions=${open_positions}`,
-                    }),
-                }],
-        };
     });
+    server.tool("commit_to_job", "Commit a portion of the trading-agent's deposited collateral to a specific job. Requires TRADING_AGENT_PRIVATE_KEY (or MCP_PRIVATE_KEY).", {
+        job_id: z.number().int().positive(),
+        amount: z.string().describe("Amount in wei to commit"),
+    }, async ({ job_id, amount }) => {
+        try {
+            const vault = getVaultAs("trading_agent");
+            const tx = await vault.commitToJob(BigInt(job_id), BigInt(amount));
+            const receipt = await tx.wait();
+            return {
+                content: [{
+                        type: "text",
+                        text: JSON.stringify({
+                            success: true,
+                            job_id,
+                            amount,
+                            tx_hash: tx.hash,
+                            block_number: receipt?.blockNumber,
+                            gas_used: receipt?.gasUsed?.toString(),
+                        }, null, 2),
+                    }],
+            };
+        }
+        catch (err) {
+            return {
+                content: [{
+                        type: "text",
+                        text: JSON.stringify({
+                            success: false,
+                            error: err instanceof Error ? err.message : String(err),
+                        }),
+                    }],
+                isError: true,
+            };
+        }
+    });
+    // NOTE: report_pnl was removed because LockstepRegistry has no reportPnl
+    // function in the current ABI (verified against
+    // ../lockstep/packages/contracts/src/core/LockstepRegistry.sol). The previous
+    // simulation called a non-existent function. P&L is derived on-chain by the
+    // PerformanceEvaluator from TradingEscrow.jobBalances at evaluation time, not
+    // self-reported by agents.
 }

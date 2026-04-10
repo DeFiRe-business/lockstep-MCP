@@ -1,114 +1,103 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { getInternalPools as getInternalPoolsData, getArbOpportunities as getArbOpportunitiesData, computeRouteResult } from "../data-store.js";
-import { getOptimalRouteFromChain } from "../blockchain/contracts.js";
-import { ethers } from "ethers";
+import { getRouter, getInternalHook } from "../blockchain/contracts.js";
+
+const PoolKeySchema = z.object({
+  currency0: z.string(),
+  currency1: z.string(),
+  fee: z.number().int().nonnegative(),
+  tick_spacing: z.number().int(),
+  hooks: z.string(),
+});
+
+type PoolKeyInput = z.infer<typeof PoolKeySchema>;
+
+function toPoolKeyTuple(p: PoolKeyInput) {
+  return {
+    currency0: p.currency0,
+    currency1: p.currency1,
+    fee: p.fee,
+    tickSpacing: p.tick_spacing,
+    hooks: p.hooks,
+  };
+}
 
 export function registerRoutingTools(server: McpServer): void {
   server.tool(
-    "smart_route",
-    "Find optimal routing between Lockstep internal pools and external Uniswap pools",
+    "get_optimal_route",
+    "Quote the LockstepRouter's optimal split between an internal Lockstep pool and an external Uniswap pool. Read-only — no transaction. Caller supplies both PoolKeys.",
     {
       token_in: z.string(),
       token_out: z.string(),
-      amount_in: z.number().positive(),
-      execute: z.boolean().default(false),
-      max_slippage_bps: z.number().int().min(1).max(1000).default(50),
+      amount_in: z.string().describe("Amount in (wei, string-encoded uint256)"),
+      internal_pool: PoolKeySchema,
+      external_pool: PoolKeySchema,
     },
-    async ({ token_in, token_out, amount_in, execute, max_slippage_bps }) => {
-      const onChainRoute = await getOptimalRouteFromChain(
-        token_in,
-        token_out,
-        ethers.parseUnits(amount_in.toString(), 18)
-      );
+    async ({ token_in, token_out, amount_in, internal_pool, external_pool }) => {
+      try {
+        const router = getRouter();
+        const result = await router.getOptimalRoute(
+          token_in,
+          token_out,
+          BigInt(amount_in),
+          toPoolKeyTuple(internal_pool),
+          toPoolKeyTuple(external_pool),
+        );
 
-      if (onChainRoute) {
         return {
           content: [{
             type: "text" as const,
             text: JSON.stringify({
-              internal_amount: ethers.formatUnits(onChainRoute.internalAmount, 18),
-              external_amount: ethers.formatUnits(onChainRoute.externalAmount, 18),
-              expected_output: ethers.formatUnits(onChainRoute.expectedOutput, 18),
-              source: "on-chain",
-              execute,
-              max_slippage_bps,
-              message: execute
-                ? "Route executed on-chain via LockstepRouter."
-                : "Quote only. Set execute: true to perform the swap.",
-            }),
+              internal_amount: (result.internalAmount as bigint).toString(),
+              external_amount: (result.externalAmount as bigint).toString(),
+              expected_output: (result.expectedOutput as bigint).toString(),
+              total_fee_cost: (result.totalFeeCost as bigint).toString(),
+              saved_vs_external: (result.savedVsExternal as bigint).toString(),
+            }, null, 2),
           }],
         };
+      } catch (err) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({ error: err instanceof Error ? err.message : String(err) }),
+          }],
+          isError: true,
+        };
       }
+    },
+  );
 
-      const { route, pool } = computeRouteResult(token_in, token_out, amount_in);
+  server.tool(
+    "get_internal_hook_config",
+    "Read the LockstepInternalHook configuration: micro fee in bps and protocol treasury address.",
+    {},
+    async () => {
+      try {
+        const hook = getInternalHook();
+        const [microFeeBps, treasury] = await Promise.all([
+          hook.microFeeBps() as Promise<bigint>,
+          hook.protocolTreasury() as Promise<string>,
+        ]);
 
-      if (execute) {
         return {
           content: [{
             type: "text" as const,
             text: JSON.stringify({
-              ...route,
-              execute: true,
-              max_slippage_bps,
-              source: "mock",
-              message: `Simulated execution: split ${amount_in} ${token_in} → ${route.internalAmount.toFixed(2)} via internal pool + ${route.externalAmount.toFixed(2)} via external. Expected output: ${route.expectedOutput.toFixed(4)} ${token_out}. Saved ${route.savedVsExternal.toFixed(4)} in fees vs pure external routing.`,
-            }),
+              micro_fee_bps: microFeeBps.toString(),
+              protocol_treasury: treasury,
+            }, null, 2),
           }],
         };
+      } catch (err) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({ error: err instanceof Error ? err.message : String(err) }),
+          }],
+          isError: true,
+        };
       }
-
-      return {
-        content: [{
-          type: "text" as const,
-          text: JSON.stringify({
-            ...route,
-            execute: false,
-            source: "mock",
-            pool_pair: pool?.pair ?? "none",
-            message: pool
-              ? `Quote: ${route.internalAmount.toFixed(2)} via internal (${pool.microFeeBps}bps fee) + ${route.externalAmount.toFixed(2)} via external (30bps fee). Saves ${route.savedVsExternal.toFixed(4)} vs pure external.`
-              : `No internal pool found for ${token_in}/${token_out}. Full amount routed externally.`,
-          }),
-        }],
-      };
-    }
-  );
-
-  server.tool(
-    "get_internal_pools",
-    "List Lockstep internal pools with TVL, volume, and price comparison",
-    {
-      token: z.string().optional(),
     },
-    async ({ token }) => {
-      const pools = getInternalPoolsData(token);
-
-      return {
-        content: [{
-          type: "text" as const,
-          text: JSON.stringify({ pools, count: pools.length }),
-        }],
-      };
-    }
-  );
-
-  server.tool(
-    "get_arb_opportunities",
-    "Detect arbitrage opportunities between internal and external pools",
-    {
-      min_profit_bps: z.number().int().min(1).default(10),
-      limit: z.number().int().min(1).max(20).default(5),
-    },
-    async ({ min_profit_bps, limit }) => {
-      const opportunities = getArbOpportunitiesData(min_profit_bps, limit);
-
-      return {
-        content: [{
-          type: "text" as const,
-          text: JSON.stringify({ opportunities, count: opportunities.length }),
-        }],
-      };
-    }
   );
 }

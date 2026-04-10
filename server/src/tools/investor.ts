@@ -1,170 +1,206 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { getProposalById, getOpenPositions } from "../data-store.js";
-import { getConfig } from "../config.js";
+import { ethers } from "ethers";
+import {
+  getRegistry,
+  getHook,
+  getVault,
+  getVaultAs,
+} from "../blockchain/contracts.js";
 
 export function registerInvestorTools(server: McpServer): void {
   server.tool(
-    "fund_proposal",
-    "Deposit capital to back a trading agent proposal",
-    {
-      proposal_id: z.string(),
-      amount: z.number().positive(),
-      token: z.string(),
-    },
-    async ({ proposal_id, amount, token }) => {
-      const proposal = getProposalById(proposal_id);
-      if (!proposal) {
-        return {
-          content: [{ type: "text" as const, text: JSON.stringify({ error: `Proposal ${proposal_id} not found` }) }],
-          isError: true,
-        };
-      }
-
-      if (proposal.status !== "funding") {
-        return {
-          content: [{ type: "text" as const, text: JSON.stringify({ error: `Proposal ${proposal_id} is not accepting funding (status: ${proposal.status})` }) }],
-          isError: true,
-        };
-      }
-
-      const remaining = proposal.capitalRequired - proposal.capitalRaised;
-      if (amount > remaining) {
-        return {
-          content: [{ type: "text" as const, text: JSON.stringify({ error: `Amount ${amount} exceeds remaining capacity ${remaining}` }) }],
-          isError: true,
-        };
-      }
-
-      return {
-        content: [{
-          type: "text" as const,
-          text: JSON.stringify({
-            status: "pending_tx",
-            proposal_id,
-            amount,
-            token,
-            message: `To fund this proposal, approve and send ${amount} ${token} to the Lockstep Hook contract. Use your wallet to sign the transaction.`,
-            remaining_after: remaining - amount,
-          }),
-        }],
-      };
-    }
-  );
-
-  server.tool(
     "get_my_positions",
-    "Get all active investment positions for the connected wallet",
+    "List all non-zero investor positions for a given wallet across every job (1..nextAgentId-1).",
     {
-      track: z.string().optional(),
+      wallet_address: z.string().describe("Investor wallet address"),
     },
-    async () => {
-      const config = getConfig();
-      const wallet = config.walletAddress ?? "0xDEMO";
-      const positions = getOpenPositions(wallet);
+    async ({ wallet_address }) => {
+      try {
+        const wallet = ethers.getAddress(wallet_address);
+        const registry = getRegistry();
+        const hook = getHook();
+        const next: bigint = await registry.nextAgentId();
+        const upper = Number(next);
 
-      return {
-        content: [{
-          type: "text" as const,
-          text: JSON.stringify({ wallet, positions, count: positions.length }),
-        }],
-      };
-    }
-  );
+        const positions: Array<{
+          agent_id: string;
+          agent_name: string;
+          amount: string;
+        }> = [];
 
-  server.tool(
-    "withdraw_position",
-    "Withdraw from an investment position (may incur early exit penalties)",
-    {
-      proposal_id: z.string(),
-      amount: z.number().positive(),
-      confirm_early_exit: z.boolean().optional(),
-    },
-    async ({ proposal_id, amount, confirm_early_exit }) => {
-      const proposal = getProposalById(proposal_id);
-      if (!proposal) {
+        for (let id = 1; id < upper; id++) {
+          try {
+            const amount: bigint = await hook.investorPositions(BigInt(id), wallet);
+            if (amount === 0n) continue;
+            const raw = await registry.getAgent(BigInt(id));
+            positions.push({
+              agent_id: id.toString(),
+              agent_name: raw.name,
+              amount: amount.toString(),
+            });
+          } catch {
+            // skip
+          }
+        }
+
         return {
-          content: [{ type: "text" as const, text: JSON.stringify({ error: `Proposal ${proposal_id} not found` }) }],
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({ wallet, positions, count: positions.length }, null, 2),
+          }],
+        };
+      } catch (err) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({ error: err instanceof Error ? err.message : String(err) }),
+          }],
           isError: true,
         };
       }
+    },
+  );
 
-      const isEarlyExit = proposal.status === "active";
+  server.tool(
+    "get_my_claims",
+    "List all non-zero claims filed by a wallet across every job. Reads CollateralVault.claims(jobId, wallet).",
+    {
+      wallet_address: z.string(),
+    },
+    async ({ wallet_address }) => {
+      try {
+        const wallet = ethers.getAddress(wallet_address);
+        const registry = getRegistry();
+        const vault = getVault();
+        const next: bigint = await registry.nextAgentId();
+        const upper = Number(next);
 
-      if (isEarlyExit && !confirm_early_exit) {
+        const claims: Array<{
+          job_id: string;
+          claimant: string;
+          amount: string;
+          upstream: string;
+          reasoning_cid: string;
+          slash_evidence_hash: string;
+          timestamp: string;
+        }> = [];
+
+        for (let id = 1; id < upper; id++) {
+          try {
+            const c = await vault.claims(BigInt(id), wallet);
+            if ((c.amount as bigint) === 0n) continue;
+            claims.push({
+              job_id: (c.jobId as bigint).toString(),
+              claimant: c.claimant,
+              amount: (c.amount as bigint).toString(),
+              upstream: c.upstream,
+              reasoning_cid: c.reasoningCID,
+              slash_evidence_hash: c.slashEvidenceHash,
+              timestamp: (c.timestamp as bigint).toString(),
+            });
+          } catch {
+            // skip
+          }
+        }
+
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({ wallet, claims, count: claims.length }, null, 2),
+          }],
+        };
+      } catch (err) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({ error: err instanceof Error ? err.message : String(err) }),
+          }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  server.tool(
+    "get_committed_collateral",
+    "Read the committed collateral locked against a job in CollateralVault.",
+    {
+      agent_id: z.number().int().positive(),
+    },
+    async ({ agent_id }) => {
+      try {
+        const vault = getVault();
+        const amount: bigint = await vault.committedCollateral(BigInt(agent_id));
         return {
           content: [{
             type: "text" as const,
             text: JSON.stringify({
-              warning: "Early withdrawal detected. You will forfeit your profit share for this cycle. Set confirm_early_exit: true to proceed.",
-              proposal_id,
-              amount,
-              penalty: "forfeit_profit_share",
-            }),
+              agent_id,
+              committed_collateral: amount.toString(),
+            }, null, 2),
           }],
         };
+      } catch (err) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({ error: err instanceof Error ? err.message : String(err) }),
+          }],
+          isError: true,
+        };
       }
-
-      return {
-        content: [{
-          type: "text" as const,
-          text: JSON.stringify({
-            status: "pending_tx",
-            proposal_id,
-            amount,
-            early_exit: isEarlyExit,
-            message: isEarlyExit
-              ? `Withdrawing ${amount} with early exit penalty (profit share forfeited). Sign the transaction to proceed.`
-              : `Withdrawing ${amount} from completed proposal. Sign the transaction to proceed.`,
-          }),
-        }],
-      };
-    }
+    },
   );
+
+  // ─── Write tool ───────────────────────────────────────────────────────────
 
   server.tool(
     "file_claim",
-    "File a claim against a failed agent's collateral via ERC-8210",
+    "File a claim against a failed job's collateral via CollateralVault.fileClaim. Requires INVESTOR_PRIVATE_KEY (or MCP_PRIVATE_KEY).",
     {
-      proposal_id: z.string(),
-      claim_amount: z.number().positive(),
+      job_id: z.number().int().positive(),
+      amount: z.string().describe("Claim amount in wei"),
+      upstream: z.string().default("0x0000000000000000000000000000000000000000000000000000000000000000").describe("Optional upstream reference (bytes32)"),
+      reasoning_cid: z.string().default("0x0000000000000000000000000000000000000000000000000000000000000000").describe("Optional CID of off-chain reasoning report (bytes32)"),
+      slash_evidence_hash: z.string().default("0x0000000000000000000000000000000000000000000000000000000000000000").describe("Optional slash evidence hash (bytes32). Use 0x0 if not slash-backed."),
     },
-    async ({ proposal_id, claim_amount }) => {
-      const proposal = getProposalById(proposal_id);
-      if (!proposal) {
+    async ({ job_id, amount, upstream, reasoning_cid, slash_evidence_hash }) => {
+      try {
+        const vault = getVaultAs("investor");
+        const tx = await vault.fileClaim(
+          BigInt(job_id),
+          BigInt(amount),
+          upstream,
+          reasoning_cid,
+          slash_evidence_hash,
+        );
+        const receipt = await tx.wait();
         return {
-          content: [{ type: "text" as const, text: JSON.stringify({ error: `Proposal ${proposal_id} not found` }) }],
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({
+              success: true,
+              job_id,
+              amount,
+              tx_hash: tx.hash,
+              block_number: receipt?.blockNumber,
+              gas_used: receipt?.gasUsed?.toString(),
+            }, null, 2),
+          }],
+        };
+      } catch (err) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({
+              success: false,
+              error: err instanceof Error ? err.message : String(err),
+            }),
+          }],
           isError: true,
         };
       }
-
-      if (proposal.status !== "failed") {
-        return {
-          content: [{ type: "text" as const, text: JSON.stringify({ error: `Claims can only be filed against failed proposals. Current status: ${proposal.status}` }) }],
-          isError: true,
-        };
-      }
-
-      const maxClaim = proposal.collateralAmount;
-      if (claim_amount > maxClaim) {
-        return {
-          content: [{ type: "text" as const, text: JSON.stringify({ error: `Claim amount ${claim_amount} exceeds available collateral ${maxClaim}` }) }],
-          isError: true,
-        };
-      }
-
-      return {
-        content: [{
-          type: "text" as const,
-          text: JSON.stringify({
-            status: "claim_submitted",
-            proposal_id,
-            claim_amount,
-            collateral_available: maxClaim,
-            message: `Claim of ${claim_amount} filed against proposal ${proposal_id}. The evaluator will process this claim against the agent's collateral of ${maxClaim}.`,
-          }),
-        }],
-      };
-    }
+    },
   );
 }

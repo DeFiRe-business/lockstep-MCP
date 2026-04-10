@@ -1,29 +1,28 @@
 import { ethers } from "ethers";
-export declare function getRegistry(): ethers.Contract | null;
-export declare function getHook(): ethers.Contract | null;
-export declare function getInternalHook(): ethers.Contract | null;
-export declare function getRouter(): ethers.Contract | null;
-export declare function getAgentFromChain(jobId: string): Promise<{
-    agent: string;
-    name: string;
-    capital: bigint;
-    collateral: bigint;
-    pnl: bigint;
-    status: number;
-} | null>;
-export declare function getInvestorPositionFromChain(jobId: string, investor: string): Promise<{
-    amount: bigint;
-    fundedAt: bigint;
-    currentValue: bigint;
-} | null>;
-export declare function getInternalPoolStateFromChain(poolId: string): Promise<{
-    tvl: bigint;
-    volume24h: bigint;
-    microFeeBps: number;
-    price: bigint;
-} | null>;
-export declare function getOptimalRouteFromChain(tokenIn: string, tokenOut: string, amountIn: bigint): Promise<{
-    internalAmount: bigint;
-    externalAmount: bigint;
-    expectedOutput: bigint;
-} | null>;
+import { type ActorRole } from "../config.js";
+export declare const REGISTRY_ABI: readonly ["function getAgent(uint256 agentId) view returns (tuple(address owner, string name, string strategy, uint256 collateral, uint256 capitalManaged, uint256 commitmentDeadline, uint256 minReturnBps, uint256 profitSplitInvestorBps, uint256 profitSplitAgentBps, uint256 profitSplitProtocolBps, uint8 tier, uint8 status))", "function nextAgentId() view returns (uint256)", "function isRegisteredAgent(address) view returns (bool)", "function registerTradingAgent(string name, string strategy, uint256 collateral, uint256 capitalManaged, uint256 commitmentDeadline, uint256 minReturnBps, uint256 profitSplitInvestorBps, uint256 profitSplitAgentBps, uint256 profitSplitProtocolBps) returns (uint256)", "function updateStatus(uint256 agentId, uint8 newStatus)", "event AgentRegistered(uint256 indexed agentId, address indexed owner, string name, uint8 tier)", "event StatusUpdated(uint256 indexed agentId, uint8 oldStatus, uint8 newStatus)"];
+export declare const HOOK_ABI: readonly ["function investorPositions(uint256 jobId, address investor) view returns (uint256)", "function totalJobLiquidity(uint256 jobId) view returns (uint256)", "function getJobInvestors(uint256 jobId) view returns (address[])", "function poolToJob(bytes32 poolId) view returns (uint256)", "event InvestorFunded(uint256 indexed jobId, address indexed investor, uint256 amount)", "event EarlyExit(uint256 indexed jobId, address indexed investor, uint256 amount)", "event JobCompleted(uint256 indexed jobId, uint256 finalBalance)", "event JobFailed(uint256 indexed jobId, uint256 finalBalance)", "event ProfitDistributed(uint256 indexed jobId, uint256 investorShare, uint256 agentShare, uint256 protocolShare)"];
+export declare const INTERNAL_HOOK_ABI: readonly ["function microFeeBps() view returns (uint256)", "function protocolTreasury() view returns (address)", "function setMicroFee(uint256 newFeeBps)", "event InternalFeeCollected(address indexed sender, bytes32 indexed poolId, uint256 fee, address treasury)", "event MicroFeeUpdated(uint256 oldFee, uint256 newFee)"];
+export declare const ROUTER_ABI: readonly ["function getOptimalRoute(address tokenIn, address tokenOut, uint256 amountIn, tuple(address currency0, address currency1, uint24 fee, int24 tickSpacing, address hooks) internalPool, tuple(address currency0, address currency1, uint24 fee, int24 tickSpacing, address hooks) externalPool) view returns (tuple(uint256 internalAmount, uint256 externalAmount, uint256 expectedOutput, uint256 totalFeeCost, uint256 savedVsExternal))", "function executeRoute(address tokenIn, address tokenOut, uint256 amountIn, uint256 minAmountOut, uint256 internalSplitBps, tuple(address currency0, address currency1, uint24 fee, int24 tickSpacing, address hooks) internalPool, tuple(address currency0, address currency1, uint24 fee, int24 tickSpacing, address hooks) externalPool) returns (uint256)", "event RouteExecuted(address indexed trader, uint256 internalAmount, uint256 externalAmount, uint256 totalOutput)"];
+export declare const ESCROW_ABI: readonly ["function jobBalances(uint256 jobId) view returns (uint256)", "function deposit(uint256 jobId) payable", "event Deposited(uint256 indexed jobId, uint256 amount)", "event Released(uint256 indexed jobId, address indexed recipient, uint256 amount)", "event SwapExecuted(uint256 indexed jobId, uint256 amountIn)"];
+export declare const EVALUATOR_ABI: readonly ["function finalBalance(uint256 jobId) view returns (uint256)", "function evaluate(uint256 jobId)", "event Evaluated(uint256 indexed jobId, bool success, uint256 finalBalance, uint256 minExpected)"];
+export declare const VAULT_ABI: readonly ["function deposits(address agent) view returns (uint256)", "function committedCollateral(uint256 jobId) view returns (uint256)", "function claims(uint256 jobId, address investor) view returns (tuple(uint256 jobId, address claimant, uint256 amount, bytes32 upstream, bytes32 reasoningCID, bytes32 slashEvidenceHash, uint256 timestamp))", "function deposit() payable", "function commitToJob(uint256 jobId, uint256 amount)", "function fileClaim(uint256 jobId, uint256 amount, bytes32 upstream, bytes32 reasoningCID, bytes32 slashEvidenceHash)", "event Deposited(address indexed agent, uint256 amount)", "event CommittedToJob(uint256 indexed jobId, uint256 amount)", "event CollateralReleased(uint256 indexed jobId, uint256 amount)", "event ClaimFiled(uint256 indexed jobId, address indexed investor, uint256 amount, bytes32 upstream, bytes32 reasoningCID, bytes32 slashEvidenceHash)"];
+export declare const EVAL_REGISTRY_ABI: readonly ["function minStake() view returns (uint256)", "function totalSlashedFunds() view returns (uint256)", "function slashCount() view returns (uint256)", "function evaluators(address) view returns (uint256 stake, bool active, uint256 registeredAt)", "function getEvaluator(address evaluator) view returns (tuple(uint256 stake, bool active, uint256 registeredAt))", "function getSlashRecord(uint256 jobId) view returns (tuple(address evaluator, uint256 jobId, uint256 slashedAmount, bytes32 reason, uint256 timestamp))", "function buildEvidenceHash(uint256 jobId) view returns (bytes32)", "function setMinStake(uint256 newMinStake)", "function registerEvaluator(address evaluator) payable", "function withdraw(address evaluator, uint256 amount)", "function slashEvaluator(address evaluator, uint256 jobId, uint256 slashedAmount, bytes32 reason)", "event EvaluatorRegistered(address indexed evaluator, uint256 stake)", "event EvaluatorStakeIncreased(address indexed evaluator, uint256 added, uint256 newTotal)", "event EvaluatorWithdrawn(address indexed evaluator, uint256 amount, uint256 remainingStake)", "event EvaluatorSlashed(address indexed evaluator, uint256 indexed jobId, uint256 slashedAmount, bytes32 reason)", "event MinStakeUpdated(uint256 oldMinStake, uint256 newMinStake)"];
+export declare function getRegistry(): ethers.Contract;
+export declare function getHook(): ethers.Contract;
+export declare function getInternalHook(): ethers.Contract;
+export declare function getRouter(): ethers.Contract;
+export declare function getEscrow(): ethers.Contract;
+export declare function getEvaluator(): ethers.Contract;
+export declare function getVault(): ethers.Contract;
+export declare function getEvalRegistry(): ethers.Contract;
+export declare function getRegistryAs(role: ActorRole): ethers.Contract;
+export declare function getVaultAs(role: ActorRole): ethers.Contract;
+export declare function getEvaluatorAs(role: ActorRole): ethers.Contract;
+export declare function getEvalRegistryAs(role: ActorRole): ethers.Contract;
+export declare function getRouterAs(role: ActorRole): ethers.Contract;
+export declare function getInternalHookAs(role: ActorRole): ethers.Contract;
+export declare const STATUS_NAMES: readonly ["Funding", "Active", "Completed", "Failed"];
+export declare const TIER_NAMES: readonly ["Newcomer", "Verified", "Established"];
+export declare function statusName(s: number | bigint): string;
+export declare function tierName(t: number | bigint): string;
